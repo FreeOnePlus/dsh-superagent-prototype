@@ -3,6 +3,7 @@ import { realpathSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
 import { CodexRpc } from './rpc.mjs';
 import { StateStore, hash } from './store.mjs';
+import { isolatedToolConfig, pluginMcpRestrictions, unexpectedMcpServers } from './tool-boundary.mjs';
 
 export const reportSchema = {
   type: 'object', additionalProperties: false, required: ['state', 'summary'],
@@ -94,26 +95,57 @@ export class CodexExecutor extends EventEmitter {
     catch (error) { await client.close(); this.clients.delete(state.taskId); throw error; }
     return client;
   }
+  async discardClient(state, client) {
+    if (this.clients.get(state.taskId) !== client) return;
+    this.clients.delete(state.taskId);
+    await client.close();
+  }
+  async thread(active, client, env, retried = false) {
+    const { state } = active;
+    // Read effective config only in memory. Persist only generated plugin/server disable flags.
+    const { config } = await client.request('config/read', { cwd: state.cwd, includeLayers: false });
+    const configOverrides = isolatedToolConfig(config, state.pluginRestrictions ?? {}, { shellTool: true });
+    const params = {
+      cwd: state.cwd,
+      approvalPolicy: 'never',
+      sandbox: this.options.sandbox,
+      ...(this.options.model ? { model: this.options.model } : {}),
+      config: configOverrides,
+      developerInstructions: 'This is a bounded execution assignment. Preserve existing changes and obey project instructions. '
+        + 'Do not delegate to other agents. Use rtk for shell commands when available. '
+        + 'Return a structured report: ready only when the requested work and relevant checks are complete; '
+        + 'waiting for a follow-up; blocked when a missing decision or permission prevents progress; failed for an execution failure. '
+        + 'Report observed facts and remaining work. Your report is not an independent approval, merge, release, or AWR acceptance.',
+    };
+    const previousThread = state.threadId;
+    const response = state.threadId
+      ? await client.request('thread/resume', { ...params, threadId: state.threadId, excludeTurns: true })
+      : await client.request('thread/start', { ...params, environments: [] });
+    if (!response?.thread?.id || (state.threadId && response.thread.id !== state.threadId)) {
+      throw new Error('Incompatible Codex thread response');
+    }
+    state.threadId = response.thread.id; this.store.write(state);
+    const unexpected = await unexpectedMcpServers(client, state.threadId, 'Cannot verify the worker tool boundary');
+    if (!unexpected.length) return client;
+    const restrictions = pluginMcpRestrictions(configOverrides.plugins, unexpected);
+    state.threadId = previousThread;
+    if (restrictions) state.pluginRestrictions = restrictions;
+    this.store.write(state);
+    await this.discardClient(state, client);
+    if (retried || !restrictions) throw new Error('Unexpected MCP tools remain enabled for the worker');
+    if (this.closed || active.cancel) return client;
+    const replacement = await this.client(state, env);
+    active.client = replacement;
+    return this.thread(active, replacement, env, true);
+  }
   async execute(active, prompt, env, onAccepted) {
     const { state, request } = active;
+    const previousThread = state.threadId;
     let client, unsubscribe = () => {}, sent = false, timer;
     try {
       client = active.client = await this.client(state, env);
       if (active.cancel) return this.finish(state, request, { status: 'interrupted', finishedAt: now() });
-      const params = {
-        cwd: state.cwd, approvalPolicy: 'never', sandbox: this.options.sandbox,
-        ...(this.options.model ? { model: this.options.model } : {}),
-        developerInstructions: 'This is a bounded execution assignment. Preserve existing changes and obey project instructions. '
-          + 'Do not delegate to other agents. Use rtk for shell commands when available. '
-          + 'Return a structured report: ready only when the requested work and relevant checks are complete; '
-          + 'waiting for a follow-up; blocked when a missing decision or permission prevents progress; failed for an execution failure. '
-          + 'Report observed facts and remaining work. Your report is not an independent approval, merge, release, or AWR acceptance.',
-      };
-      const response = state.threadId
-        ? await client.request('thread/resume', { ...params, threadId: state.threadId, excludeTurns: true })
-        : await client.request('thread/start', params);
-      if (!response?.thread?.id || (state.threadId && response.thread.id !== state.threadId)) throw new Error('Incompatible Codex thread response');
-      state.threadId = response.thread.id; this.store.write(state);
+      client = active.client = await this.thread(active, client, env);
       if (active.cancel) return this.finish(state, request, { status: 'interrupted', finishedAt: now() });
       const messages = []; const early = [];
       let resolveTurn, rejectTurn, interaction;
@@ -141,7 +173,7 @@ export class CodexExecutor extends EventEmitter {
       };
       request.status = 'submitting'; this.store.write(state); sent = true;
       const started = await client.request('turn/start', {
-        threadId: state.threadId, input: [{ type: 'text', text: prompt }], outputSchema: reportSchema,
+        threadId: state.threadId, input: [{ type: 'text', text: prompt }], outputSchema: reportSchema, environments: [],
       });
       if (!started?.turn?.id) throw new Error('Incompatible Codex turn response');
       request.turnId = started.turn.id; request.status = 'running'; this.store.write(state);
@@ -161,12 +193,13 @@ export class CodexExecutor extends EventEmitter {
       return this.finish(state, request, result);
     } catch (error) {
       try {
+        if (!sent) state.threadId = previousThread;
         return this.finish(state, request, {
           status: sent ? 'unknown' : 'failed', error: error.message, finishedAt: now(),
         });
       } finally {
-        // Do not release a worker slot while an uncertain owned process can keep running.
-        if (sent && client) { await client.close(); this.clients.delete(state.taskId); }
+        // Do not retain an owned process after any failed startup or uncertain turn.
+        if (active.client) await this.discardClient(state, active.client);
       }
     } finally { clearTimeout(timer); unsubscribe(); }
   }

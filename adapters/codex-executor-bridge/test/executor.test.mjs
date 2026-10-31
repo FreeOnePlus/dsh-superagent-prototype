@@ -29,10 +29,11 @@ function temporaryFixture(t) {
 }
 
 class FakeRpc extends EventEmitter {
-  constructor(handler = () => { throw new Error('Unexpected RPC request'); }, initialize = async () => ({})) {
+  constructor(handler = () => { throw new Error('Unexpected RPC request'); }, initialize = async () => ({}), boundary = {}) {
     super();
     this.handler = handler;
     this.initializeHandler = initialize;
+    this.boundary = boundary;
     this.requests = [];
     this.initializeCalls = 0;
     this.closeCalls = 0;
@@ -46,6 +47,16 @@ class FakeRpc extends EventEmitter {
   request(method, params) {
     this.requests.push({ method, params });
     try {
+      if (method === 'config/read') {
+        const response = this.boundary.configRead;
+        return Promise.resolve(typeof response === 'function' ? response(params, this)
+          : response ?? { config: { mcp_servers: {}, apps: {} } });
+      }
+      if (method === 'mcpServerStatus/list') {
+        const response = this.boundary.mcpStatus;
+        return Promise.resolve(typeof response === 'function' ? response(params, this)
+          : response ?? { data: [] });
+      }
       return Promise.resolve(this.handler(method, params, this));
     } catch (error) {
       return Promise.reject(error);
@@ -74,7 +85,7 @@ function finishTurn(client, turnId, status, { report, error } = {}) {
   });
 }
 
-function standardClient() {
+function standardClient(boundary = {}) {
   let turnNumber = 0;
   let client;
   client = new FakeRpc((method, params) => {
@@ -89,7 +100,7 @@ function standardClient() {
     }
     if (method === 'turn/interrupt') return {};
     throw new Error(`Unexpected RPC request: ${method}`);
-  });
+  }, async () => ({}), boundary);
   return client;
 }
 
@@ -191,6 +202,238 @@ test('runs a later follow-up on the original thread', async t => {
   assert.equal(resume.params.threadId, first.threadId);
   assert.equal(client.requests.filter(entry => entry.method === 'thread/start').length, 1);
   assert.equal(client.requests.filter(entry => entry.method === 'turn/start').length, 2);
+  await executor.shutdown();
+});
+
+test('workers disable ambient external tools while retaining shell, sandbox, and child environment', async t => {
+  const { cwd, stateDir } = temporaryFixture(t);
+  const effectiveConfig = {
+    mcp_servers: { ambient_data: { command: 'sensitive-mcp-command' } },
+    apps: { ambient_app: { token: 'sensitive-app-token' } },
+    features: { multi_agent: true, shell_tool: true },
+  };
+  const originalConfig = structuredClone(effectiveConfig);
+  const client = standardClient({ configRead: { config: effectiveConfig } });
+  let factoryOptions;
+  const executor = new CodexExecutor({
+    stateDir,
+    rpcFactory: options => {
+      factoryOptions = options;
+      return client;
+    },
+  });
+
+  const receipt = await executor.run({
+    ...request(cwd, { env: { PROJECT_FLAG: 'retained' } }),
+    onAccepted: ({ turnId }) => finishTurn(client, turnId, 'completed', { report: validReport }),
+  });
+  assert.equal(receipt.status, 'completed');
+  assert.deepEqual(factoryOptions.env, { PROJECT_FLAG: 'retained' });
+  assert.deepEqual(effectiveConfig, originalConfig);
+
+  const thread = client.requests.find(entry => entry.method === 'thread/start');
+  const turn = client.requests.find(entry => entry.method === 'turn/start');
+  assert.deepEqual(thread.params.environments, []);
+  assert.deepEqual(turn.params.environments, []);
+  assert.equal(thread.params.sandbox, 'workspace-write');
+  assert.equal(thread.params.config.features.shell_tool, true);
+  assert.equal(thread.params.config.features.multi_agent, false);
+  assert.equal(thread.params.config.features.apps, false);
+  assert.equal(thread.params.config.web_search, 'disabled');
+  assert.deepEqual(thread.params.config.mcp_servers, {
+    ambient_data: { enabled: false, required: false },
+  });
+  assert.deepEqual(thread.params.config.apps, {
+    _default: { enabled: false },
+    ambient_app: { enabled: false },
+  });
+  assert.equal(JSON.stringify(thread.params).includes('sensitive-mcp-command'), false);
+  assert.equal(JSON.stringify(thread.params).includes('sensitive-app-token'), false);
+  assert.equal(JSON.stringify(executor.status('task-1')).includes('sensitive-mcp-command'), false);
+  assert.equal(JSON.stringify(executor.status('task-1')).includes('sensitive-app-token'), false);
+  assert.deepEqual(
+    client.requests.map(entry => entry.method),
+    ['config/read', 'thread/start', 'mcpServerStatus/list', 'turn/start'],
+  );
+  await executor.shutdown();
+});
+
+test('an unknown active MCP server fails before worker inference begins', async t => {
+  const { cwd, stateDir } = temporaryFixture(t);
+  const client = standardClient({
+    mcpStatus: {
+      data: [{ name: 'unowned-server', runtimeStatus: 'starting', tools: {} }],
+    },
+  });
+  const executor = new CodexExecutor({ stateDir, rpcFactory: () => client });
+
+  const receipt = await executor.run(request(cwd));
+  assert.equal(receipt.status, 'failed');
+  assert.match(receipt.error, /Unexpected MCP tools remain enabled for the worker/);
+  assert.equal(client.requests.some(entry => entry.method === 'turn/start'), false);
+  assert.equal(client.closeCalls, 1);
+  assert.equal(executor.status('task-1').threadId, null);
+  await executor.shutdown();
+});
+
+test('plugin MCP restrictions replace the owned process and persist across worker restart', async t => {
+  const { cwd, stateDir } = temporaryFixture(t);
+  const discovered = {
+    name: 'bundled-worker-server',
+    pluginId: 'plugin.worker-fixture',
+    runtimeStatus: 'ready',
+    tools: { lookup: { description: 'Synthetic lookup.' } },
+  };
+  const disabled = { ...discovered, runtimeStatus: 'disabled', tools: {} };
+  const discoveryClient = standardClient({ mcpStatus: { data: [discovered] } });
+  const replacementClient = standardClient({ mcpStatus: { data: [disabled] } });
+  let factoryCalls = 0;
+  const factoryOptions = [];
+  const firstExecutor = new CodexExecutor({
+    stateDir,
+    rpcFactory: options => {
+      factoryCalls += 1;
+      factoryOptions.push(options);
+      if (factoryCalls === 1) return discoveryClient;
+      assert.equal(discoveryClient.closeCalls, 1);
+      return replacementClient;
+    },
+  });
+
+  const firstReceipt = await firstExecutor.run({
+    ...request(cwd, { env: { PROJECT_FLAG: 'retained-across-replacement' } }),
+    onAccepted: ({ turnId }) => finishTurn(replacementClient, turnId, 'completed', { report: validReport }),
+  });
+  assert.equal(firstReceipt.status, 'completed');
+  assert.equal(factoryCalls, 2);
+  assert.deepEqual(factoryOptions.map(options => options.env), [
+    { PROJECT_FLAG: 'retained-across-replacement' },
+    { PROJECT_FLAG: 'retained-across-replacement' },
+  ]);
+  assert.equal(discoveryClient.requests.some(entry => entry.method === 'turn/start'), false);
+  const replacementThread = replacementClient.requests.find(entry => entry.method === 'thread/start');
+  assert.deepEqual(replacementThread.params.config.plugins, {
+    'plugin.worker-fixture': { mcp_servers: { 'bundled-worker-server': { enabled: false } } },
+  });
+  assert.equal(Object.hasOwn(replacementThread.params.config.plugins['plugin.worker-fixture'], 'enabled'), false);
+  assert.deepEqual(firstExecutor.status('task-1').pluginRestrictions, replacementThread.params.config.plugins);
+  await firstExecutor.shutdown();
+
+  const restartedClient = standardClient({ mcpStatus: { data: [disabled] } });
+  let restartFactoryCalls = 0;
+  const restarted = new CodexExecutor({
+    stateDir,
+    rpcFactory: () => {
+      restartFactoryCalls += 1;
+      return restartedClient;
+    },
+  });
+  const secondReceipt = await restarted.run({
+    ...request(cwd, {
+      requestId: 'request-2',
+      prompt: 'Continue with the persisted worker boundary.',
+      env: { PROJECT_FLAG: 'retained-across-replacement' },
+    }),
+    onAccepted: ({ turnId }) => finishTurn(restartedClient, turnId, 'completed', { report: validReport }),
+  });
+  assert.equal(secondReceipt.status, 'completed');
+  assert.equal(restartFactoryCalls, 1);
+  const resumed = restartedClient.requests.find(entry => entry.method === 'thread/resume');
+  assert.deepEqual(resumed.params.config.plugins, replacementThread.params.config.plugins);
+  assert.equal(restartedClient.requests.filter(entry => entry.method === 'thread/resume').length, 1);
+  await restarted.shutdown();
+});
+
+test('failed discovery on a replacement process closes it, rolls back the thread, and permits a clean restart', async t => {
+  const failures = [
+    {
+      name: 'thrown status error',
+      status: () => { throw new Error('Synthetic status discovery failure'); },
+    },
+    {
+      name: 'invalid status page',
+      status: { data: null },
+    },
+  ];
+
+  for (const [index, failure] of failures.entries()) {
+    const { cwd, stateDir } = temporaryFixture(t);
+    const discovered = {
+      name: `bundled-startup-${index}`,
+      pluginId: 'plugin.startup-fixture',
+      runtimeStatus: 'ready',
+      tools: { lookup: {} },
+    };
+    const discoveryClient = standardClient({ mcpStatus: { data: [discovered] } });
+    const brokenReplacement = standardClient({ mcpStatus: failure.status });
+    const cleanClient = standardClient();
+    const clients = [discoveryClient, brokenReplacement, cleanClient];
+    let factoryCalls = 0;
+    const executor = new CodexExecutor({
+      stateDir,
+      rpcFactory: () => clients[factoryCalls++],
+    });
+
+    const failed = await executor.run(request(cwd));
+    assert.equal(failed.status, 'failed', failure.name);
+    assert.equal(discoveryClient.closeCalls, 1, failure.name);
+    assert.equal(brokenReplacement.closeCalls, 1, failure.name);
+    assert.equal(discoveryClient.requests.some(entry => entry.method === 'turn/start'), false, failure.name);
+    assert.equal(brokenReplacement.requests.some(entry => entry.method === 'turn/start'), false, failure.name);
+    assert.equal(executor.status('task-1').threadId, null, failure.name);
+
+    const completed = await executor.run({
+      ...request(cwd, { requestId: 'request-2', prompt: 'Retry only after clean startup isolation.' }),
+      onAccepted: ({ turnId }) => finishTurn(cleanClient, turnId, 'completed', { report: validReport }),
+    });
+    assert.equal(completed.status, 'completed', failure.name);
+    assert.equal(factoryCalls, 3, failure.name);
+    assert.equal(cleanClient.requests.filter(entry => entry.method === 'thread/start').length, 1, failure.name);
+    assert.equal(cleanClient.requests.some(entry => entry.method === 'thread/resume'), false, failure.name);
+    await executor.shutdown();
+  }
+});
+
+test('cancellation during MCP discovery prevents replacement and turn start', async t => {
+  const { cwd, stateDir } = temporaryFixture(t);
+  const listing = deferred();
+  const listingStarted = deferred();
+  const client = standardClient({
+    mcpStatus: () => {
+      listingStarted.resolve();
+      return listing.promise;
+    },
+  });
+  let factoryCalls = 0;
+  const executor = new CodexExecutor({
+    stateDir,
+    rpcFactory: () => {
+      factoryCalls += 1;
+      return client;
+    },
+  });
+  const running = executor.run(request(cwd));
+  await listingStarted.promise;
+
+  const cancellation = await executor.stop('task-1');
+  assert.deepEqual(cancellation, { requested: true, confirmed: false });
+  listing.resolve({
+    data: [{
+      name: 'bundled-worker-server',
+      pluginId: 'plugin.worker-fixture',
+      runtimeStatus: 'ready',
+      tools: { lookup: {} },
+    }],
+  });
+  const receipt = await running;
+
+  assert.equal(receipt.status, 'interrupted');
+  assert.equal(factoryCalls, 1);
+  assert.equal(client.closeCalls, 1);
+  assert.equal(client.requests.some(entry => entry.method === 'turn/start'), false);
+  assert.deepEqual(executor.status('task-1').pluginRestrictions, {
+    'plugin.worker-fixture': { mcp_servers: { 'bundled-worker-server': { enabled: false } } },
+  });
   await executor.shutdown();
 });
 

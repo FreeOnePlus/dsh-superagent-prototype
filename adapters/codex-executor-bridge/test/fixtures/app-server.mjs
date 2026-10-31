@@ -77,10 +77,14 @@ input.on('line', line => {
     send({ id: message.id, result: { capabilities: {} } });
   } else if (message.method === 'initialized') {
     // Notification acknowledgement is intentionally empty.
+  } else if (message.method === 'config/read') {
+    send({ id: message.id, result: { config: { mcp_servers: {}, apps: {} } } });
   } else if (message.method === 'thread/start') {
     send({ id: message.id, result: { thread: { id: 'fixture-thread' } } });
   } else if (message.method === 'thread/resume') {
     send({ id: message.id, result: { thread: { id: message.params.threadId } } });
+  } else if (message.method === 'mcpServerStatus/list') {
+    send({ id: message.id, result: { data: [] } });
   } else if (message.method === 'turn/start') {
     void startTurn(message);
   } else if (message.method === 'turn/interrupt') {
