@@ -1,0 +1,12 @@
+{
+  "name": "@originoneai/codex-executor-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "Apache-2.0",
+  "files": ["src", "README.md", "LICENSE"],
+  "engines": { "node": ">=22.19.0" },
+  "exports": { ".": "./src/executor.mjs", "./connector": "./src/connector.mjs" },
+  "scripts": { "test": "node --test test/*.test.mjs" },
+  "dependencies": { "proper-lockfile": "4.1.2" }
+}

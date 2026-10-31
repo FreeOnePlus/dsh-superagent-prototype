@@ -1,0 +1,140 @@
+# Codex Executor Bridge
+
+Use Codex as a native worker behind an orchestration host, without embedding the
+host's implementation in the execution component.
+
+The first connector targets the versioned external-executor seam supplied with
+this delivery. The upstream prototype does **not** offer this seam unmodified.
+The coordinator still uses DSH; worker assignments execute directly in Codex.
+There is no DSH worker relaying coding instructions to another model.
+
+```text
+Orchestrator Engine
+    -> optional executorModule (API v1)
+    -> connector.mjs: host task/input/report translation
+    -> executor.mjs: durable Codex thread and turn ownership
+    -> Codex app-server over stdio
+```
+
+## Requirements
+
+- Node.js 22.19+ within the 22.x series, or Node.js 24+ for the host.
+- A signed-in Codex CLI with the documented app-server protocol. The initial
+  local validation used Codex CLI 0.153.4.
+- The separately maintained upstream extension patch, based on commit
+  `6337fc823ce20251c8de8085948165c81aaa701e`.
+- A model available to the signed-in account. An installed default model can be
+  unavailable to that account; the bridge preserves that failure instead of
+  silently selecting another model.
+
+## Install
+
+Install this independent package from its checkout:
+
+```sh
+npm ci --ignore-scripts
+```
+
+Apply the supplied extension patch to the upstream checkout, first using
+`git apply --check`, then run its locked checks and build. The patch preserves
+the built-in executor when `executorModule` is not configured. An invalid
+configured module stops startup; it never falls back silently.
+
+Add an absolute module path to the existing host plugin configuration:
+
+```yaml
+executorModule: /absolute/path/codex-executor-bridge/src/connector.mjs
+```
+
+Optionally create `codex-executor.json` in the host's existing **state directory**:
+
+```json
+{
+  "command": ["codex", "app-server"],
+  "sandbox": "workspace-write",
+  "timeoutMs": 30000,
+  "turnTimeoutMs": 1800000
+}
+```
+
+Add `model` only when an explicit model is needed. Omit it to retain Codex's
+configuration. Hosts that require RTK can use
+`["rtk", "proxy", "codex", "app-server"]`. Do not put credentials in this file.
+Codex uses its existing login. Restart the host after changing the executor
+module or its configuration; Node caches imported modules.
+
+The usual host repository setup, source authorization, worker environment and
+workspace preparation still apply. The adapter does not configure those for you.
+Start with an isolated checkout and a dedicated host state directory.
+
+## Behavior
+
+| Operation | Behavior |
+| --- | --- |
+| Dispatch | Records request identity before creating a Codex turn |
+| Follow-up | Uses the same per-ticket Codex thread and workspace; queues while a turn is active |
+| Duplicate | Same identity/content returns its recorded receipt; changed content is rejected |
+| Cancel | Calls `turn/interrupt`; its acknowledgement alone is not proof of interruption |
+| Resume | Restores the saved thread; reconciles known turns before starting new work |
+| Unknown result | Blocks automatic replay; retains the thread and turn references for investigation |
+| Report | Validates structured output; distinguishes completion, failure, interruption and uncertainty |
+| Late result | Cannot update an ended or replaced host assignment |
+| Concurrency | Launches and follow-ups share the configured worker limit |
+
+Worker state uses private files, atomic replacement and an exclusive writer
+lock. Preserve `codex-executor-state/` alongside the host state and Codex's own
+thread history. After an unclean exit the stale lock expires after 30 seconds;
+this does not authorize replay of an ambiguous request. Workspace effects are
+not rolled back by cancellation.
+
+The non-interactive bridge uses `approvalPolicy: never` with a read-only or
+workspace-write sandbox. Server requests needing an interactive approval or
+user input are declined/blocked, never automatically granted. This component is
+not an authentication or approval bypass.
+
+## Boundaries
+
+- A worker's `ready` report retains the host's existing ticket semantics. It is
+  **not** an independent review, merge, release, or AWR acceptance receipt.
+- The web panel can retain task state and supervisor report visibility. A Codex
+  worker is not a DSH Session: the existing DSH worker-chat link cannot display
+  its conversation. A native transcript viewer is outside this first adapter.
+- This version supplies start, queued follow-up, cancellation and recovery. It
+  does not expose every DSH worker-specific tool to Codex or replace the DSH
+  coordinator, source connectors, deployment setup, or model configuration.
+- `ExecutorHost` is a current-version connector contract. Only `connector.mjs`
+  depends on its DTOs. `executor.mjs`, `rpc.mjs` and `store.mjs` do not import the
+  host. A future breaking change requires updating and testing the connector or
+  revising the seam's API version. Future compatibility is not assumed.
+- Missing start acknowledgement without a saved turn ID remains unknown. This
+  version deliberately requires investigation rather than guessing which turn
+  belongs to the request. There is no exactly-once guarantee for external tool
+  side effects.
+
+## Verification
+
+```sh
+npm test
+```
+
+The public tests use original synthetic inputs and an explicit fake app-server;
+they cover idempotency, cancellation races, recovery, structured reporting,
+concurrency and host callback fencing. Real-model runs and internal task records
+are kept outside the public source tree. Passing these tests is not full DSH UI,
+GitHub/Feishu, multi-user or AWR business acceptance.
+
+Official transport reference: [Codex app-server](https://developers.openai.com/codex/app-server/).
+
+## Upgrade procedure
+
+1. Keep the currently verified upstream commit and adapter version available.
+2. Apply the small extension patch to a new upstream checkout with
+   `git apply --check`; stop if it does not apply cleanly.
+3. Run upstream checks and this package's tests. Verify API v1 shape validation
+   and launch a real task, follow-up and cancellation in an isolated environment.
+4. Adopt the new version only after verifying receipts. Patch application alone
+   proves neither compatibility nor business acceptance.
+
+This independent implementation is licensed under Apache-2.0. The upstream
+checkout and its separately maintained changes retain the upstream license and
+notices; upstream source is not vendored into this package.
