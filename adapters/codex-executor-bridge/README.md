@@ -1,19 +1,21 @@
-# Codex Executor Bridge
+# Codex Coordination and Execution Bridge
 
-Use Codex as a native worker behind an orchestration host, without embedding the
-host's implementation in the execution component.
+Use Codex for coordination and native workers behind an orchestration host,
+without embedding the host's implementation in the adapters.
 
-The first connector targets the versioned external-executor seam supplied with
-this delivery. The upstream prototype does **not** offer this seam unmodified.
-The coordinator still uses DSH; worker assignments execute directly in Codex.
-There is no DSH worker relaying coding instructions to another model.
+The connector targets the versioned extension seams supplied with this fork.
+The unmodified upstream prototype does **not** offer these seams.
+Worker-only configuration retains the DSH coordinator. Configuring both modules
+uses Codex for the main coordinator and workers. The host still provides the
+task engine, durable effects, source connections, settings and management panel.
 
 ```text
-Orchestrator Engine
-    -> optional executorModule (API v1)
-    -> connector.mjs: host task/input/report translation
-    -> executor.mjs: durable Codex thread and turn ownership
-    -> Codex app-server over stdio
+Source messages and worker reports
+    -> coordinatorModule (API v1)
+    -> durable serial inbox -> Codex coordinator
+    -> validated host tools -> Orchestrator Engine
+    -> executorModule (API v1)
+    -> independent Codex workers -> reports back to the coordinator
 ```
 
 ## Requirements
@@ -21,6 +23,8 @@ Orchestrator Engine
 - Node.js 22.19+ within the 22.x series, or Node.js 24+ for the host.
 - A signed-in Codex CLI with the documented app-server protocol. The initial
   local validation used Codex CLI 0.153.4.
+- The coordinator opts into experimental `dynamicTools` and `item/tool/call`.
+  Pin and validate the Codex version; these are not a stable compatibility promise.
 - The separately maintained upstream extension patch, based on commit
   `6337fc823ce20251c8de8085948165c81aaa701e`.
 - A model available to the signed-in account. An installed default model can be
@@ -35,8 +39,10 @@ Install this independent package from its checkout:
 npm ci --ignore-scripts
 ```
 
-Apply the supplied extension patch to the upstream checkout, first using
-`git apply --check`, then run its locked checks and build. The patch preserves
+When using the fork's `adapters/codex-executor-bridge` directory, the host seams
+are already included. When using an unmodified upstream checkout, apply the
+supplied extension patch, first using `git apply --check`, then run its locked
+checks and build. The extension preserves
 the built-in executor when `executorModule` is not configured. An invalid
 configured module stops startup; it never falls back silently.
 
@@ -44,6 +50,7 @@ Add an absolute module path to the existing host plugin configuration:
 
 ```yaml
 executorModule: /absolute/path/codex-executor-bridge/src/connector.mjs
+coordinatorModule: /absolute/path/codex-executor-bridge/src/coordinator-connector.mjs
 ```
 
 Optionally create `codex-executor.json` in the host's existing **state directory**:
@@ -62,6 +69,25 @@ configuration. Hosts that require RTK can use
 `["rtk", "proxy", "codex", "app-server"]`. Do not put credentials in this file.
 Codex uses its existing login. Restart the host after changing the executor
 module or its configuration; Node caches imported modules.
+
+The coordinator reads a separate optional `codex-coordinator.json` in the same
+host state directory:
+
+```json
+{
+  "command": ["codex", "app-server"],
+  "timeoutMs": 30000,
+  "turnTimeoutMs": 600000
+}
+```
+
+It also accepts an explicit `model`. Neither file changes the user's global
+Codex settings. The coordinator operates without a writable execution environment;
+it calls the supplied host tools. Ambient MCP and app tools are disabled for its
+thread. Bundled plugin MCP connections are discovered and scoped off while the
+plugins and safety hooks remain installed. If isolation cannot be confirmed,
+no model turn starts. Discovery may replace the adapter's own process once before
+work begins; it does not terminate other Codex sessions.
 
 The usual host repository setup, source authorization, worker environment and
 workspace preparation still apply. The adapter does not configure those for you.
@@ -100,8 +126,9 @@ not an authentication or approval bypass.
   worker is not a DSH Session: the existing DSH worker-chat link cannot display
   its conversation. A native transcript viewer is outside this first adapter.
 - This version supplies start, queued follow-up, cancellation and recovery. It
-  does not expose every DSH worker-specific tool to Codex or replace the DSH
-  coordinator, source connectors, deployment setup, or model configuration.
+  does not expose every DSH worker-specific tool to Codex or replace source
+  connectors, deployment setup, or the management application's model settings.
+  Select Codex models in the bridge configuration files.
 - `ExecutorHost` is a current-version connector contract. Only `connector.mjs`
   depends on its DTOs. `executor.mjs`, `rpc.mjs` and `store.mjs` do not import the
   host. A future breaking change requires updating and testing the connector or
@@ -110,6 +137,37 @@ not an authentication or approval bypass.
   version deliberately requires investigation rather than guessing which turn
   belongs to the request. There is no exactly-once guarantee for external tool
   side effects.
+
+## Coordinator behavior
+
+- One persisted Codex thread handles waking messages in order. Workers remain
+  parallel; the coordinator does not wait in a model turn for worker completion.
+- Message IDs bind their exact text and wake flag. Repeated delivery is a no-op;
+  reusing an ID with changed content is rejected.
+- Silent notices are persisted without a model call and included with the next
+  waking message. Mid-turn steering and native DSH injection semantics are not
+  implemented by this serial adapter.
+- The host supplies the current prompt revision and named tool schemas. It
+  validates arguments before execution; the bridge binds calls to the active
+  thread and turn. Plain model prose never creates a task or sends a source reply.
+- Tool calls are journaled before invocation, with results saved before returning
+  them to Codex. Repeated call IDs return the recorded result. A failed query
+  explicitly marked `readOnly` by the host returns a recorded error without
+  blocking later work. Other exceptions after invocation leave an uncertain
+  outcome and stop automatic advancement.
+- Shutdown stops active work and retains queued messages. On restart, known turn
+  IDs are reconciled with Codex history. No acknowledged terminal result means no
+  automatic replay; status identifies the affected request for investigation.
+- `CodexCoordinator` exposes `status()`, `idle()`, and `recover()` to local hosts.
+  `recover()` queries existing turns; it never asserts that an uncertain external
+  operation did not happen. Preserve `codex-coordinator-state/` together with
+  the host database and Codex thread history.
+
+The upstream extension retains its normal domain authorization and reply gates.
+It exposes external coordinator status through the existing session status view.
+Native DSH coordinator/worker chat transcripts, assessment image delivery,
+advanced live steering and full UI parity are outside this adapter. Local
+adapter verification is not live GitHub/Feishu or AWR Team business acceptance.
 
 ## Verification
 

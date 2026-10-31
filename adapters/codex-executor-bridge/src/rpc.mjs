@@ -9,12 +9,19 @@ export class RpcError extends Error {
 
 /** One owned stdio connection. No private files or interactive output parsing. */
 export class CodexRpc extends EventEmitter {
-  constructor({ command = ['codex', 'app-server'], cwd, env = {}, timeoutMs = 30000 } = {}) {
+  constructor({
+    command = ['codex', 'app-server'], cwd, env = {}, timeoutMs = 30000,
+    experimentalApi = false, onToolCall,
+  } = {}) {
     super();
     if (!Array.isArray(command) || !command.length || command.some(x => typeof x !== 'string')) {
       throw new Error('command must be a non-empty argument array');
     }
+    if (onToolCall !== undefined && typeof onToolCall !== 'function') {
+      throw new Error('onToolCall must be a function');
+    }
     this.sequence = 0; this.pending = new Map(); this.timeoutMs = timeoutMs;
+    this.experimentalApi = experimentalApi === true; this.onToolCall = onToolCall;
     this.process = spawn(command[0], command.slice(1), {
       cwd, env: { ...process.env, ...env }, stdio: ['pipe', 'pipe', 'pipe'], shell: false,
     });
@@ -41,8 +48,8 @@ export class CodexRpc extends EventEmitter {
   }
   async initialize() {
     const result = await this.request('initialize', {
-      clientInfo: { name: 'originone_executor_bridge', title: 'Codex Executor Bridge', version: '0.1.0' },
-      capabilities: { experimentalApi: false },
+      clientInfo: { name: 'originone_executor_bridge', title: 'Codex Coordination and Execution Bridge', version: '0.2.0' },
+      capabilities: { experimentalApi: this.experimentalApi },
     });
     this.send({ method: 'initialized', params: {} });
     return result;
@@ -66,6 +73,10 @@ export class CodexRpc extends EventEmitter {
   }
   receive(message) {
     if (message.method && message.id !== undefined) {
+      if (message.method === 'item/tool/call' && this.experimentalApi && this.onToolCall) {
+        void this.handleToolCall(message).catch(() => {});
+        return;
+      }
       // This non-interactive bridge never silently grants a server-initiated approval.
       const decision = {
         'item/commandExecution/requestApproval': { decision: 'decline' },
@@ -82,6 +93,24 @@ export class CodexRpc extends EventEmitter {
       else entry.resolve(message.result);
     } else if (message.method) this.emit('notification', message);
   }
+  async handleToolCall(message) {
+    let result;
+    try {
+      result = await this.onToolCall(message.params);
+    } catch {
+      result = {
+        contentItems: [{ type: 'inputText', text: 'Dynamic tool call failed.' }],
+        success: false,
+      };
+    }
+    if (this.failure || this.closing) return;
+    try { this.send({ id: message.id, result }); }
+    catch (error) {
+      if (!this.failure && !this.closing) {
+        this.fail(error instanceof RpcError ? error : new RpcError('Unable to reply to dynamic tool call', 'WRITE', true));
+      }
+    }
+  }
   fail(error) {
     if (this.failure) return;
     this.failure = error;
@@ -89,6 +118,7 @@ export class CodexRpc extends EventEmitter {
     this.pending.clear(); this.emit('disconnected', error);
   }
   async close() {
+    this.closing = true;
     if (this.process.exitCode !== null || this.process.signalCode !== null) return;
     this.process.stdin.end();
     await new Promise(resolve => {
