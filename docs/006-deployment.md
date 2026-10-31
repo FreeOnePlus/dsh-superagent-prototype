@@ -93,9 +93,12 @@ Copy [examples/profile.cordis.patch.yml](../examples/profile.cordis.patch.yml) t
 | Key | Required | Meaning |
 | --- | --- | --- |
 | `stateDir` | yes | Absolute path: the database, the lock, the command shims in `worker-bin`, the agent's git configuration and, by default, the Ticket directories in `work`. Back it up before upgrades |
+| `executorModule` | no | Absolute path to an ESM module that replaces only worker execution through external Executor API version 1; a load, version or shape error prevents startup |
 | `promptMaxChars`, `admissionContextMaxPages`, `admissionContextTimeoutMs` | no | The largest saved prompt configuration, and how many Thread pages one assessment reads within what time |
 
-After the first start, edit machine limits in **Settings → Deployment** or the DeepSeek Harness Plugin Manager. Changes apply without restart. `stateDir` cannot be changed there. Invalid values or unknown configuration keys prevent startup; the log identifies the key.
+An external module exports `apiVersion = 1` and a synchronous `createExecutor(host, helpers)` function. It receives the current-version `ExecutorHost` connector and helpers for preparing Ticket metadata and missing workspaces, deferring busy effects, relaying recorded reports and checking whether a Ticket waits for a person, then returns the complete managed Executor lifecycle. The main Session remains a DSH Session. External workers do not have DSH worker Session links in the panel. There is no fallback to the built-in Executor when a configured module fails.
+
+After the first start, edit machine limits in **Settings → Deployment** or the DeepSeek Harness Plugin Manager. Changes apply without restart. `stateDir` and `executorModule` cannot be changed there. Invalid values or unknown configuration keys prevent startup; the log identifies the key.
 
 ## Start and stop
 
