@@ -51,6 +51,8 @@ describe('configuration schema', () => {
     expect(() => Config(minimal({ stateDir: '~/dir' }))).toThrow()
     expect(Config(minimal({ executorModule: join(dir, 'executor.mjs') })).executorModule).toBe(join(dir, 'executor.mjs'))
     expect(() => Config(minimal({ executorModule: 'executor.mjs' }))).toThrow()
+    expect(Config(minimal({ coordinatorModule: join(dir, 'coordinator.mjs') })).coordinatorModule).toBe(join(dir, 'coordinator.mjs'))
+    expect(() => Config(minimal({ coordinatorModule: 'coordinator.mjs' }))).toThrow()
   })
   it('names keys the configuration does not define, and where the values of older keys live now', () => {
     const raw = minimal({ repository: 'acme/widgets', repositoryPath: '/srv/widgets', blockedCommands: [], author: { name: 'Alice' }, extra: 1 })

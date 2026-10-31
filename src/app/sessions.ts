@@ -19,6 +19,7 @@ import { SKILL_PREFIX, type PromptVersion, type Prompts } from './prompts.ts'
 import type { Store } from './store.ts'
 import { KV } from '../kv.ts'
 import type { RegisterTool, Tool } from './tools/tool.ts'
+import type { ManagedCoordinator } from '../coordinator/extension.ts'
 
 /** Host dependencies used by `Sessions`. */
 export interface SessionsHost {
@@ -31,6 +32,8 @@ export interface SessionsHost {
   readonly health: HealthEntry
   readonly masterId: string
   readonly lifetime: AbortSignal
+  /** Configured external main coordinator, once Runtime composition has created it. */
+  coordinator(): ManagedCoordinator | undefined
   closing(): boolean
   /** Execution environment variables for `ticket`, rendered into its worker's system prompt. */
   environment(ticket: Ticket): Variable[]
@@ -124,7 +127,8 @@ export class Sessions {
     ctx.inject(['agentPresets'], child => {
       child.on('agent-preset/selected', (sessionId, preset) => {
         const ticketId = ticketOfSession(sessionId), agent = ctx.agents.get(sessionId as SessionId)
-        const ours = sessionId === this.host.masterId ? ROUTER_PRESET : ticketId && this.host.store.tickets.get(ticketId) ? WORKER_PRESET : undefined
+        const ours = sessionId === this.host.masterId ? (this.host.coordinator() ? undefined : ROUTER_PRESET)
+          : ticketId && this.host.store.tickets.get(ticketId) ? WORKER_PRESET : undefined
         if (!ours || preset === ours || !agent) return
         const presets = child.get('agentPresets') as { select(agent: Agent, preset: string): Promise<string> }
         presets.select(agent, ours).catch(() => {})
@@ -155,12 +159,22 @@ export class Sessions {
   }
   /** Returns whether `sessionId` already holds the message delivered under `requestId`, or `false` if the session does not exist. */
   async holds(sessionId: string, requestId: string): Promise<boolean> {
+    const coordinator = sessionId === this.host.masterId ? this.host.coordinator() : undefined
+    if (coordinator) return await coordinator.holds(key(requestId))
     const result = await this.ctx.sessionController.resolveAgent(sessionId as SessionId)
     return !('error' in result) && await this.agentDelivery.holds(result.agent, key(requestId))
   }
   /** Deliver a message once per request id: to the next turn, the current one, or `inject`ed with its label without waking the agent. */
   async prompt(sessionId: string, requestId: string, text: string, mode: 'queue' | 'steer' | { inject: string }, authorize?: () => void,
     accepted?: () => void): Promise<void> {
+    const coordinator = sessionId === this.host.masterId ? this.host.coordinator() : undefined
+    if (coordinator) {
+      this.host.lifetime.throwIfAborted()
+      authorize?.()
+      await coordinator.deliver({ id: key(requestId), text, wake: typeof mode !== 'object' })
+      accepted?.()
+      return
+    }
     const result = await this.ctx.sessionController.resolveAgent(sessionId as SessionId)
     if ('error' in result) throw result.error
     await this.agentDelivery.send(result.agent, key(requestId), text, mode, this.host.lifetime, authorize, accepted)
@@ -178,6 +192,11 @@ export class Sessions {
   }
   /** Injects a notice into the main Session without waking it; no-op if the main Session does not exist yet. */
   private async inject(name: string, value: Record<string, unknown>, summary: string): Promise<void> {
+    if (this.host.coordinator()) {
+      const text = JSON.stringify(value)
+      await this.prompt(this.host.masterId, `notice:${name}:${key(text)}`, text, { inject: summary })
+      return
+    }
     const resolved = await this.ctx.sessionController.resolveAgent(this.host.masterId as SessionId)
     if ('error' in resolved) return
     // Deduplicate by notice name and payload hash so retries are idempotent while updated payloads still deliver.
@@ -189,9 +208,13 @@ export class Sessions {
     const { store, prompts, effects } = this.host
     const sessions = store.keys(KV.sessions.prompts).flatMap(name => {
       const sessionId = name.slice(KV.sessions.prompts.prefix.length), revision = store.get(name)?.at(-1)
-      return this.ctx.agents.get(sessionId as SessionId) && revision !== undefined ? [{ sessionId, revision }] : []
+      const active = sessionId === this.host.masterId ? !!this.host.coordinator() || !!this.ctx.agents.get(sessionId as SessionId)
+        : !!this.ctx.agents.get(sessionId as SessionId)
+      return active && revision !== undefined ? [{ sessionId, revision }] : []
     })
-    return { revision: prompts.current().revision, sessions, notificationPending: effects.pending('notice', 'prompts') }
+    const coordinator = this.host.coordinator()
+    return { revision: prompts.current().revision, sessions, notificationPending: effects.pending('notice', 'prompts'),
+      ...(coordinator ? { coordinator: coordinator.status() } : {}) }
   }
   /** Returns the prompt version a Session runs under (the one bound on its latest model request, or the current version). */
   promptVersion(sessionId: string): PromptVersion {
@@ -201,6 +224,13 @@ export class Sessions {
   /** Whether a Session is authorized to read `revision` (its active revision or any revision it previously ran under). */
   mayRead(sessionId: string, revision: number): boolean {
     return revision === this.promptVersion(sessionId).revision || (this.host.store.get(KV.sessions.prompts(sessionId)) ?? []).includes(revision)
+  }
+  /** Returns the current composed main prompt and records its revision as consumed by the external coordinator. */
+  coordinatorPrompt(): { text: string; revision: number } {
+    const version = this.host.prompts.current()
+    this.recordPrompt(this.host.masterId, version.revision)
+    const composed = this.host.prompts.compose(version.config, 'orchestrator')
+    return { revision: version.revision, text: `[dsh-superagent prompt revision ${version.revision}]\n${composed}\n` }
   }
   /** Returns a tool registrar for `agent` that renders tool output as JSON text and attaches `output.image` as an image when present. */
   private registerTool(agent: Agent, binding: SessionBinding): RegisterTool {
@@ -233,6 +263,7 @@ export class Sessions {
     if (this.bindings.has(agent)) return
     const host = this.host
     const master = agent.id === host.masterId
+    if (master && host.coordinator()) return
     const ticket = master ? undefined : this.ticketOf(agent)
     if (!master && !ticket) { this.limitSubagent(agent); return }
     const binding: SessionBinding = { disposers: [] }
@@ -331,11 +362,15 @@ export class Sessions {
     if (!bind) return version
     const binding = this.bindings.get(agent)
     if (binding) this.bindSkills(binding, version)
-    const { store } = this.host
-    const revisions = store.get(KV.sessions.prompts(agent.id)) ?? []
-    const bound = [...revisions.filter(revision => revision !== version.revision), version.revision]
-    if (revisions.at(-1) !== version.revision) store.set(KV.sessions.prompts(agent.id), bound)
+    this.recordPrompt(agent.id, version.revision)
     return version
+  }
+  /** Record one prompt revision as most recently bound while retaining earlier readable revisions. */
+  private recordPrompt(sessionId: string, revision: number): void {
+    const { store } = this.host
+    const revisions = store.get(KV.sessions.prompts(sessionId)) ?? []
+    const bound = [...revisions.filter(item => item !== revision), revision]
+    if (revisions.at(-1) !== revision) store.set(KV.sessions.prompts(sessionId), bound)
   }
   /** Releases registrations for `agent` in reverse order (LIFO); disposing its skill scope releases its skills as well. */
   private release(agent: Agent): void {

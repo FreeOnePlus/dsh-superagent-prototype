@@ -4,13 +4,16 @@ import { join } from 'node:path'
 import { expect, it, vi } from 'vitest'
 import { Config, type Machine } from '../src/deployment.ts'
 import type { ExecutorFactory } from '../src/executor/extension.ts'
+import type { CoordinatorFactory } from '../src/coordinator/extension.ts'
 import { apply } from '../src/index.ts'
 
 // Stub Runtime to capture the resolved Machine settings and restart callback.
-const runtimes = vi.hoisted(() => [] as { machine: Machine; restart: () => void; executorFactory?: ExecutorFactory }[])
+const runtimes = vi.hoisted(() => [] as { machine: Machine; restart: () => void; executorFactory?: ExecutorFactory;
+  coordinatorFactory?: CoordinatorFactory }[])
 vi.mock('../src/app/runtime.ts', () => ({ Runtime: class {
   ready = Promise.resolve()
-  constructor(_ctx: unknown, readonly machine: Machine, readonly restart: () => void, readonly executorFactory?: ExecutorFactory) { runtimes.push(this) }
+  constructor(_ctx: unknown, readonly machine: Machine, readonly restart: () => void, readonly executorFactory?: ExecutorFactory,
+    readonly coordinatorFactory?: CoordinatorFactory) { runtimes.push(this) }
   configured() { return true }
   async stop() {}
 } }))
@@ -39,11 +42,29 @@ it('reads a limit DSH commits a new value of without a restart, and asks DSH to 
   expect(configure).toHaveBeenCalledExactlyOnceWith({ auto: false }, ctx.fiber)
   const { machine } = runtimes.at(-1)!
   expect(runtimes.at(-1)!.executorFactory).toBeUndefined()
+  expect(runtimes.at(-1)!.coordinatorFactory).toBeUndefined()
   expect(machine.promptMaxChars.get()).toBe(5000)
   commit(config.promptMaxChars, 8000)
   expect(machine.promptMaxChars.get()).toBe(8000)
   expect(handlers.has('loader/volatile-update')).toBe(false)
   expect(ctx.fiber.restart).not.toHaveBeenCalled()
+})
+
+it('loads a configured coordinator module before constructing Runtime and does not fall back when validation fails', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'coordinator-entry-'))
+  try {
+    const valid = join(dir, 'valid.mjs')
+    writeFileSync(valid, 'export const apiVersion = 1; export function createCoordinator() {}\n')
+    const { ctx } = context()
+    await apply(ctx as never, Config({ stateDir: '/srv/state', coordinatorModule: valid }))
+    expect(runtimes.at(-1)!.coordinatorFactory).toBeTypeOf('function')
+
+    const invalid = join(dir, 'invalid.mjs')
+    writeFileSync(invalid, 'export const apiVersion = 2; export function createCoordinator() {}\n')
+    const before = runtimes.length
+    await expect(apply(context().ctx as never, Config({ stateDir: '/srv/state', coordinatorModule: invalid }))).rejects.toThrow('API version must be 1')
+    expect(runtimes).toHaveLength(before)
+  } finally { rmSync(dir, { recursive: true, force: true }) }
 })
 
 it('loads a configured executor module before constructing Runtime and does not fall back when validation fails', async () => {
