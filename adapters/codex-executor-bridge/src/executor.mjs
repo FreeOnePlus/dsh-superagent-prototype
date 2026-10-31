@@ -89,7 +89,7 @@ export class CodexExecutor extends EventEmitter {
     let client = this.clients.get(state.taskId);
     if (client?.failure) { await client.close(); this.clients.delete(state.taskId); client = null; }
     if (client) return client;
-    client = this.rpcFactory({ ...this.options, cwd: state.cwd, env, experimentalApi: true });
+    client = this.rpcFactory({ ...this.options, cwd: state.cwd, env });
     this.clients.set(state.taskId, client);
     try { await client.initialize(); }
     catch (error) { await client.close(); this.clients.delete(state.taskId); throw error; }
@@ -120,7 +120,7 @@ export class CodexExecutor extends EventEmitter {
     const previousThread = state.threadId;
     const response = state.threadId
       ? await client.request('thread/resume', { ...params, threadId: state.threadId, excludeTurns: true })
-      : await client.request('thread/start', { ...params, environments: [] });
+      : await client.request('thread/start', params);
     if (!response?.thread?.id || (state.threadId && response.thread.id !== state.threadId)) {
       throw new Error('Incompatible Codex thread response');
     }
@@ -173,7 +173,7 @@ export class CodexExecutor extends EventEmitter {
       };
       request.status = 'submitting'; this.store.write(state); sent = true;
       const started = await client.request('turn/start', {
-        threadId: state.threadId, input: [{ type: 'text', text: prompt }], outputSchema: reportSchema, environments: [],
+        threadId: state.threadId, input: [{ type: 'text', text: prompt }], outputSchema: reportSchema,
       });
       if (!started?.turn?.id) throw new Error('Incompatible Codex turn response');
       request.turnId = started.turn.id; request.status = 'running'; this.store.write(state);

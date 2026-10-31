@@ -23,8 +23,8 @@ Source messages and worker reports
 - Node.js 22.19+ within the 22.x series, or Node.js 24+ for the host.
 - A signed-in Codex CLI with the documented app-server protocol. The initial
   local validation used Codex CLI 0.153.4.
-- Both backends opt into the experimental environment-selection API; the
-  coordinator also uses experimental `dynamicTools` and `item/tool/call`.
+- The coordinator opts into the experimental environment-selection API,
+  `dynamicTools` and `item/tool/call`.
   Pin and validate the Codex version; these are not a stable compatibility promise.
 - The separately maintained upstream extension patch, based on commit
   `6337fc823ce20251c8de8085948165c81aaa701e`.
@@ -90,10 +90,12 @@ plugins and safety hooks remain installed. If isolation cannot be confirmed,
 no model turn starts. Discovery may replace the adapter's own process once before
 work begins; it does not terminate other Codex sessions.
 
-Workers apply the same ambient MCP/app restrictions while retaining shell tools
-and their configured workspace sandbox. Thread and turn requests explicitly
-omit inherited execution environments. Startup failures close the owned process
-and restore the previous thread binding before another request can start.
+Workers apply the same ambient MCP/app restrictions while retaining shell tools,
+their configured workspace sandbox and Codex's default execution environment.
+An empty `environments` list would remove their execution tools, so workers do
+not send that override. Custom remote execution environments are not validated.
+Startup failures close the owned process and restore the previous thread binding
+before another request can start.
 
 The usual host repository setup, source authorization, worker environment and
 workspace preparation still apply. The adapter does not configure those for you.

@@ -236,14 +236,14 @@ test('workers disable ambient external tools while retaining shell, sandbox, and
     onAccepted: ({ turnId }) => finishTurn(client, turnId, 'completed', { report: validReport }),
   });
   assert.equal(receipt.status, 'completed');
-  assert.equal(factoryOptions.experimentalApi, true);
+  assert.equal(Object.hasOwn(factoryOptions, 'experimentalApi'), false);
   assert.deepEqual(factoryOptions.env, { PROJECT_FLAG: 'retained' });
   assert.deepEqual(effectiveConfig, originalConfig);
 
   const thread = client.requests.find(entry => entry.method === 'thread/start');
   const turn = client.requests.find(entry => entry.method === 'turn/start');
-  assert.deepEqual(thread.params.environments, []);
-  assert.deepEqual(turn.params.environments, []);
+  assert.equal(Object.hasOwn(thread.params, 'environments'), false);
+  assert.equal(Object.hasOwn(turn.params, 'environments'), false);
   assert.equal(thread.params.sandbox, 'workspace-write');
   assert.equal(thread.params.config.features.shell_tool, true);
   assert.equal(thread.params.config.features.multi_agent, false);
