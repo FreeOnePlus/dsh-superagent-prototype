@@ -7,6 +7,7 @@ const [planFile, controlDirectory, logFile] = process.argv.slice(2);
 const input = createInterface({ input: process.stdin });
 const active = new Map();
 const finished = [];
+let experimentalApi = false;
 
 function record(value) {
   appendFileSync(logFile, JSON.stringify(value) + '\n');
@@ -74,13 +75,18 @@ input.on('line', line => {
   const message = JSON.parse(line);
   record({ event: 'rpc', method: message.method, id: message.id });
   if (message.method === 'initialize') {
+    experimentalApi = message.params?.capabilities?.experimentalApi === true;
     send({ id: message.id, result: { capabilities: {} } });
   } else if (message.method === 'initialized') {
     // Notification acknowledgement is intentionally empty.
   } else if (message.method === 'config/read') {
     send({ id: message.id, result: { config: { mcp_servers: {}, apps: {} } } });
   } else if (message.method === 'thread/start') {
-    send({ id: message.id, result: { thread: { id: 'fixture-thread' } } });
+    if (message.params.environments && !experimentalApi) {
+      send({ id: message.id, error: { code: -32602, message: 'environments require experimentalApi' } });
+    } else {
+      send({ id: message.id, result: { thread: { id: 'fixture-thread' } } });
+    }
   } else if (message.method === 'thread/resume') {
     send({ id: message.id, result: { thread: { id: message.params.threadId } } });
   } else if (message.method === 'mcpServerStatus/list') {

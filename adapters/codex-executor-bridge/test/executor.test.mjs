@@ -57,6 +57,10 @@ class FakeRpc extends EventEmitter {
         return Promise.resolve(typeof response === 'function' ? response(params, this)
           : response ?? { data: [] });
       }
+      if (method === 'thread/start' && params.environments
+        && this.boundary.requireExperimentalEnvironments && this.experimentalApi !== true) {
+        return Promise.reject(new Error('thread/start environments require the experimental API capability'));
+      }
       return Promise.resolve(this.handler(method, params, this));
     } catch (error) {
       return Promise.reject(error);
@@ -213,12 +217,16 @@ test('workers disable ambient external tools while retaining shell, sandbox, and
     features: { multi_agent: true, shell_tool: true },
   };
   const originalConfig = structuredClone(effectiveConfig);
-  const client = standardClient({ configRead: { config: effectiveConfig } });
+  const client = standardClient({
+    configRead: { config: effectiveConfig },
+    requireExperimentalEnvironments: true,
+  });
   let factoryOptions;
   const executor = new CodexExecutor({
     stateDir,
     rpcFactory: options => {
       factoryOptions = options;
+      client.experimentalApi = options.experimentalApi;
       return client;
     },
   });
@@ -228,6 +236,7 @@ test('workers disable ambient external tools while retaining shell, sandbox, and
     onAccepted: ({ turnId }) => finishTurn(client, turnId, 'completed', { report: validReport }),
   });
   assert.equal(receipt.status, 'completed');
+  assert.equal(factoryOptions.experimentalApi, true);
   assert.deepEqual(factoryOptions.env, { PROJECT_FLAG: 'retained' });
   assert.deepEqual(effectiveConfig, originalConfig);
 
@@ -239,6 +248,7 @@ test('workers disable ambient external tools while retaining shell, sandbox, and
   assert.equal(thread.params.config.features.shell_tool, true);
   assert.equal(thread.params.config.features.multi_agent, false);
   assert.equal(thread.params.config.features.apps, false);
+  assert.equal(Object.hasOwn(thread.params.config.features, 'view_image'), false);
   assert.equal(thread.params.config.web_search, 'disabled');
   assert.deepEqual(thread.params.config.mcp_servers, {
     ambient_data: { enabled: false, required: false },

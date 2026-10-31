@@ -10,10 +10,11 @@ const disabledExternalFeatures = {
   sleep_tool: false,
 };
 
-export function isolatedToolConfig(config, pluginRestrictions = {}, { shellTool }) {
+export function isolatedToolConfig(config, pluginRestrictions = {}, { shellTool, viewImage }) {
   if (!config || typeof config !== 'object') throw new Error('Effective Codex configuration is unavailable');
   const overrides = {
-    features: { shell_tool: shellTool, ...disabledExternalFeatures },
+    features: { shell_tool: shellTool, ...disabledExternalFeatures,
+      ...(viewImage === undefined ? {} : { view_image: viewImage }) },
     apps: { _default: { enabled: false } },
     mcp_servers: {},
     plugins: structuredClone(pluginRestrictions),

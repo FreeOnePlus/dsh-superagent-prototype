@@ -140,7 +140,7 @@ export class CodexCoordinator extends EventEmitter {
   async thread(client, prompt, retried = false) {
     // Read effective config only in memory. Never store or log credentials/config values.
     const { config } = await client.request('config/read', { cwd: this.cwd, includeLayers: false });
-    const overrides = isolatedToolConfig(config, this.state.pluginRestrictions ?? {}, { shellTool: false });
+    const overrides = isolatedToolConfig(config, this.state.pluginRestrictions ?? {}, { shellTool: false, viewImage: false });
     const params = { cwd: this.cwd, sandbox: 'read-only', approvalPolicy: 'never',
       ...(this.options.model ? { model: this.options.model } : {}),
       config: overrides,

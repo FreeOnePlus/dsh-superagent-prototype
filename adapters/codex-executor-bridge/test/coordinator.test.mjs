@@ -461,6 +461,7 @@ test('the internal read-only marker is omitted from app-server dynamic tool decl
 
   const startedThread = client.requests.find(request => request.method === 'thread/start');
   assert.equal(startedThread.params.dynamicTools.length, 1);
+  assert.equal(startedThread.params.config.features.view_image, false);
   assert.equal(Object.hasOwn(startedThread.params.dynamicTools[0], 'readOnly'), false);
   assert.deepEqual(startedThread.params.dynamicTools[0], {
     type: 'function',

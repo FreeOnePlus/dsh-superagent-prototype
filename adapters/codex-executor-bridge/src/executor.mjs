@@ -89,7 +89,7 @@ export class CodexExecutor extends EventEmitter {
     let client = this.clients.get(state.taskId);
     if (client?.failure) { await client.close(); this.clients.delete(state.taskId); client = null; }
     if (client) return client;
-    client = this.rpcFactory({ ...this.options, cwd: state.cwd, env });
+    client = this.rpcFactory({ ...this.options, cwd: state.cwd, env, experimentalApi: true });
     this.clients.set(state.taskId, client);
     try { await client.initialize(); }
     catch (error) { await client.close(); this.clients.delete(state.taskId); throw error; }
