@@ -45,4 +45,31 @@ describe('external executor module', () => {
       await vi.waitFor(() => expect(host.relays(host.runtime.masterId).at(-1)).toMatchObject({ kind: 'worker_report', state: 'ready', summary: 'External worker finished' }))
     } finally { await host.stop() }
   })
+
+  it('publishes worker Session IDs only for the native Executor', async () => {
+    const external = await startRuntime(undefined, (connector, helpers) => ({
+      start: (ticket, assignment) => { connector.engine.assignmentStarted(ticket.id, assignment.id) },
+      deliver: () => {}, stop: () => {}, prepare: helpers.prepareTicket,
+      install: () => {}, resume: () => {}, dispose: () => {}, shutdown: async () => {}, activeCount: () => 0,
+    }))
+    try {
+      const { ticket, sessionId } = await external.acceptedTicket(feishu('92', '@bot 用外部执行器修复回归'))
+      expect(external.agents.has(sessionId)).toBe(false)
+      expect(await external.api('GET', 'tickets?state=open')).toMatchObject({ status: 200,
+        body: { items: [{ id: ticket.id, sessionId: null }] } })
+      const detail = await external.api('GET', `tickets/${ticket.id}`)
+      expect(detail).toMatchObject({ status: 200, body: { id: ticket.id, sessionId: null } })
+      expect((detail.body.assignments as object[])[0]).not.toHaveProperty('ref')
+    } finally { await external.stop() }
+
+    const native = await startRuntime()
+    try {
+      const { ticket, sessionId } = await native.acceptedTicket(feishu('93', '@bot 用内置执行器修复回归'))
+      expect(native.agents.has(sessionId)).toBe(true)
+      expect(await native.api('GET', 'tickets?state=open')).toMatchObject({ status: 200,
+        body: { items: [{ id: ticket.id, sessionId }] } })
+      expect(await native.api('GET', `tickets/${ticket.id}`)).toMatchObject({ status: 200,
+        body: { id: ticket.id, sessionId, assignments: [{ ref: sessionId }] } })
+    } finally { await native.stop() }
+  })
 })

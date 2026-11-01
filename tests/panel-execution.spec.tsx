@@ -119,6 +119,26 @@ it('offers a Ticket awaiting review its review place and Session in the page hea
     'https://github.com/acme/widgets/pull/42']])
 })
 
+it('opens native worker Sessions and omits Session actions for external Executor tickets', async () => {
+  at({ page: 'execution', id: 't1' })
+  await mount()
+  await click(find(zh.openSession, '.dt-page-head button'))
+  expect(server.opened).toEqual(['worker-t1'])
+
+  const t1 = server.ticketDetails.t1!
+  server.ticketDetails.t1 = { ...t1, sessionId: null }
+  await remount()
+  expect(all('.dt-page-head button').some(button => button.textContent === zh.openSession)).toBe(false)
+
+  server.tickets.open = [ticketSummary({ actions: { retry: true, stop: true }, sessionId: null },
+    { stage: 'person', action: 'failed' })]
+  at({ page: 'execution' })
+  await remount()
+  expect(find(zh.retry)).toBeDefined()
+  expect(all('.dt-ticket-actions button').some(button => button.textContent === zh.openSession)).toBe(false)
+  expect(server.opened).toEqual(['worker-t1'])
+})
+
 it('keeps what a person types in the Execution settings, converting it once on save', async () => {
   await mount()
   await click(zh['tab.execution'])

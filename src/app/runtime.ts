@@ -82,6 +82,7 @@ export class Runtime extends Service implements SourceHost {
   private readonly sourceLinks = new TextCache(200_000)
   private readonly stopped = new AbortController()
   private readonly disposers: (() => void)[] = []
+  private readonly nativeExecutor: boolean
   private releaseLock?: () => Promise<void>
   private closingFlag = false
   private stopping?: Promise<void>
@@ -92,6 +93,7 @@ export class Runtime extends Service implements SourceHost {
   constructor(ctx: Context, readonly machine: Machine, restart: () => void, executorFactory?: ExecutorFactory,
     coordinatorFactory?: CoordinatorFactory) {
     super(ctx, 'orchestrator')
+    this.nativeExecutor = executorFactory === undefined
     const runtime = this
     // Lock the state directory before opening the database so another process cannot migrate or write concurrently.
     mkdirSync(machine.stateDir, { recursive: true, mode: 0o700 })
@@ -276,6 +278,8 @@ export class Runtime extends Service implements SourceHost {
     const runtime = this
     const { store, sources, prompts, sessions, settings, engine, executor, health, machine, masterId, ready, sourceLinks, setup, passes } = this
     return { store, sources, prompts, sessions, settings, engine, executor, health, machine, masterId, ready, sourceLinks,
+      get mainSessionId() { return runtime.coordinator ? null : masterId },
+      workerSessionId: ticketId => runtime.nativeExecutor ? workerSessionId(ticketId) : null,
       get deployment() { return setup.deployment },
       get setupProblem() { return setup.problem }, get feishuProblem() { return setup.feishuProblem },
       configured: () => setup.configured(), links: () => runtime.links(), ticketEnvironment: ticket => runtime.ticketEnvironment(ticket),

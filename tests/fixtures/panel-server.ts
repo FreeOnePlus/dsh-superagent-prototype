@@ -100,6 +100,7 @@ export interface PanelServer {
   searching?: (query: string) => Promise<void>
   setup: SetupView
   health: Record<string, Health>
+  mainSessionId: string | null
   /** When true, all API requests return an empty 404 to simulate the host plugin being stopped. */
   down: boolean
   /** Count of responses not yet consumed by the client. */
@@ -159,7 +160,7 @@ function sourceStatuses(): SourceStatusRow[] {
 }
 const stateView = (): StateView => ({
   setup: server.setup, load: { running: server.setup.problem ? 0 : 2, queued: 0, maxWorkers: server.settings.executor.maxWorkers },
-  masterId: 'master', paused: server.settings.paused,
+  masterId: 'master', mainSessionId: server.mainSessionId, paused: server.settings.paused,
   // The panel does not read health; the service script does.
   health: {},
 })
@@ -247,7 +248,7 @@ function initial(): PanelServer {
     en: 'Feishu message' } }
   const defaults = { revision: 0, previousRevision: null, savedAt: '', source: 'defaults' }
   return {
-    health: {}, down: false, pending: 0, opened: [], requests: [], misuse: [], queued: new Set(), dropped: [], failing: [],
+    health: {}, mainSessionId: 'master', down: false, pending: 0, opened: [], requests: [], misuse: [], queued: new Set(), dropped: [], failing: [],
     setup: { machine: MACHINE, problem: null, feishuProblem: null,
       accounts: { repository: 'acme/widgets', agent: 'agent-bot', feishu: { appId: 'cli_bot', brand: 'feishu', botId: 'ou_bot',
         name: 'Widgets Bot' } } },

@@ -55,7 +55,7 @@ function views() {
     rules: [{ id: 'copy', name: 'Copy fixes', enabled: true, instruction: 'Fix copy' }] } }))
   const sources = new SourceRegistry(() => store.settings())
   sources.register(feishuKind); sources.register(githubKind)
-  return { store, sources, links }
+  return { store, sources, links, workerSessionId: (ticketId: string) => `worker-${ticketId}` }
 }
 const at = new Date().toISOString()
 /** A live ticket with no Assignment, as a follow-up's owner needs one. */
@@ -224,7 +224,7 @@ it('names a listed bot as the Policy lists it, and gives a bot\'s Mandate a basi
   store.saveSettings(SettingsSchema.parse({ policy: { sources: { feishu: { allowed: [], bots: [{ id: 'cli_review', name: '评审机器人' }] } } } }))
   const sources = new SourceRegistry(() => store.settings())
   sources.register(feishuKind)
-  const view = snapshot({ store, sources, links })
+  const view = snapshot({ store, sources, links, workerSessionId: (ticketId: string) => `worker-${ticketId}` })
   expect(view.actor({ source: 'feishu', id: 'cli_review' }, false).name).toEqual({ zh: '评审机器人', en: '评审机器人' })
   expect(basisFacts({ via: 'bot', sender: '评审机器人', addressed: 'mention', observation: { mode: 'auto' } }, view.rule).facts)
     .toEqual([{ name: 'sender', value: '评审机器人' }, { name: 'bot' }, { name: 'addressed', value: 'mention' }, { name: 'mode', value: 'auto' }])

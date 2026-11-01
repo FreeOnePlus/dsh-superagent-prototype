@@ -49,6 +49,8 @@ describe('external coordinator module', () => {
       expect(start).toHaveBeenCalledOnce()
       expect(host.agents.has(host.runtime.masterId)).toBe(false)
       expect(host.controller.create.mock.calls.some(([input]) => input.sessionId === host.runtime.masterId)).toBe(false)
+      expect(await host.api('GET', 'state')).toMatchObject({ status: 200,
+        body: { masterId: host.runtime.masterId, mainSessionId: null } })
       expect(host.runtime.health.coordinator).toMatchObject({ state: 'ready' })
 
       const prompt = port.prompt()
@@ -85,5 +87,14 @@ describe('external coordinator module', () => {
       await host.stop()
       expect(shutdown).toHaveBeenCalledOnce()
     }
+  })
+
+  it('publishes the real native main Session as available', async () => {
+    const host = await startRuntime()
+    try {
+      expect(host.agents.has(host.runtime.masterId)).toBe(true)
+      expect(await host.api('GET', 'state')).toMatchObject({ status: 200,
+        body: { masterId: host.runtime.masterId, mainSessionId: host.runtime.masterId } })
+    } finally { await host.stop() }
   })
 })

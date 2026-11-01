@@ -73,7 +73,8 @@ export function search(host: ViewHost, query: string, links: Pick<TextCache, 'en
   const reaches = (ticket: Ticket) => [...(ticket.follows ?? []).map(follow => follow.thread),
     ...view.threadsOf(ticket.id).map(thread => thread.key)]
   const matches = (ticket: Ticket) => reaches(ticket).some(key => named.threads.includes(key)) || ticket.title.toLowerCase().includes(lower)
-  const tickets = store.tickets.list().filter(matches).sort(newestFirst).slice(0, 10).map(ticketSummary)
+  const tickets = store.tickets.list().filter(matches).sort(newestFirst).slice(0, 10)
+    .map(ticket => ticketSummary(ticket, view.workerSessionId(ticket.id)))
   // Omit automated triggers from threads already included in `threads`.
   const shownThreads = new Set(threads.map(thread => thread.key))
   const item = (trigger: Trigger) => {

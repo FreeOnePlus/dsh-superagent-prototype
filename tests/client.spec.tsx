@@ -40,10 +40,10 @@ const openMaster = async (container: HTMLElement) => {
   await act(async () => { button.click() })
   for (let i = 0; i < 5; i++) await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)) })
 }
-const serve = () => vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+const serve = (mainSessionId: string | null = 'master') => vi.stubGlobal('fetch', vi.fn(async (url: string) => {
   const path = new URL(url, 'http://127.0.0.1').pathname.replace('/orchestrator/api/', '')
   if (path === 'overview') return Response.json({ problems: [], person: [], executor: { running: 0, queued: 0, maxWorkers: 3, idle: 0 }, flow: { triggers: 0, filtered: 0, judged: 0, accepted: 0, evaluating: 0 }, policyVersion: 'v' })
-  if (path === 'state') return Response.json({ masterId: 'master', settings: SettingsSchema.parse({}), revisions: { policy: 0, eval: 0, executor: 0 }, sources: [], policy_version: 'v', health: {}, outgoing: [], load: { running: 0, queued: 0 },
+  if (path === 'state') return Response.json({ masterId: 'master', mainSessionId, settings: SettingsSchema.parse({}), revisions: { policy: 0, eval: 0, executor: 0 }, sources: [], policy_version: 'v', health: {}, outgoing: [], load: { running: 0, queued: 0 },
     setup: { machine: { stateDir: '/srv/state', worktreeRoot: '/srv/state/worktrees', blockedCommands: [], promptMaxChars: 100000, admissionContextMaxPages: 10, admissionContextTimeoutMs: 15000 }, problem: null, feishuProblem: null, accounts: null } })
   return Response.json({ error: 'unavailable' }, { status: 503 })
 }))
@@ -65,6 +65,16 @@ it('opens a listed Session through the workspace from the main panel', async () 
   const view = await render(main, { t })
   await openMaster(view.container)
   expect(ctx.uiWorkspace.openSession).toHaveBeenCalledExactlyOnceWith('master')
+  view.dispose()
+})
+
+it('shows transcript unavailability instead of a dead Session action for an external coordinator', async () => {
+  serve(null)
+  const { ctx, main } = fixture([])
+  const view = await render(main, { t })
+  expect(view.container.textContent).toContain(zh.coordinatorTranscriptUnavailable)
+  expect([...view.container.querySelectorAll('button')].some(item => item.textContent === zh.openMaster)).toBe(false)
+  expect(ctx.uiWorkspace.openSession).not.toHaveBeenCalled()
   view.dispose()
 })
 
