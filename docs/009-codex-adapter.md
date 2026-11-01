@@ -39,7 +39,15 @@ npm --prefix adapters/codex-executor-bridge test
 ```
 
 Complete the normal [host and source setup](006-deployment.md) in a dedicated
-DSH profile and state directory. In that profile's existing `dsh-superagent`
+DSH profile and state directory. Use a GitHub agent account distinct from the
+people requesting work: the GitHub Source ignores the agent's own issues and
+comments, so a self-mention cannot verify request intake.
+
+With both adapters configured, coordinator and worker inference use the existing
+Codex login. A DSH model account is not required for those turns; the host's
+ordinary new-chat screen may still offer its separate model login.
+
+In that profile's existing `dsh-superagent`
 configuration, add both absolute paths:
 
 ```yaml
@@ -68,7 +76,7 @@ Replace the model placeholder, or omit `model` to use the account's configured
 default. Environments requiring RTK can use `["rtk", "proxy", "codex", "app-server"]`.
 Do not put credentials in these files. The adapter uses Codex's existing login.
 Restart this host profile after changing modules or configuration. Full options
-and behavior are documented in the [package README](../adapters/codex-executor-bridge/README.md).
+and behavior are documented in the [adapter package](../adapters/codex-executor-bridge/).
 
 ## Operational behavior
 
@@ -102,8 +110,9 @@ Store and Effects with a Codex coordinator and Codex workers. Its source and
 outbox transports are controlled local substitutes.
 
 These checks are not a live GitHub/Feishu deployment, native client acceptance
-or a production-readiness claim. The existing panel can display host task and
-report state, but DSH chat links cannot display Codex transcripts. Image
+or a production-readiness claim. The panel displays host task and report state
+and omits DSH session links for externally managed coordinators and workers.
+It does not display Codex transcripts. Image
 assessment, mid-turn coordinator steering and complete chat UI parity remain
 outside this adapter. A worker's `ready` report is not independent approval,
 merge or release evidence.
