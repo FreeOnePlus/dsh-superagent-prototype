@@ -32,6 +32,11 @@ export interface MainToolsHost {
   /** Runs an Engine command initiated by the main Session without emitting self-notifications. */
   quietly<T>(run: () => T): T
 }
+/** Identity and optional DSH image target of the main tool caller. External coordinators deliberately have no image target. */
+export interface MainToolTarget { readonly id: string; readonly imageAgent?: Agent }
+/** Main tool metadata retained when its definition is exposed to an external coordinator. */
+export interface MainTool extends Tool { readonly readOnly?: boolean }
+const readOnly = (definition: Tool): MainTool => ({ ...definition, readOnly: true })
 /** Schedules an Engine pass to execute the recorded routing decision and formats the tool response. */
 function routed(host: MainToolsHost, result: { decision?: DecisionKind; reason: string; ticketId?: string | undefined }) {
   host.requestPass()
@@ -151,12 +156,12 @@ function routeTool(host: MainToolsHost): Tool {
     },
   })
 }
-/** Builds the main Session's tools; `agent` scopes prompt preview resources to that Session. */
-export function mainTools(host: MainToolsHost, agent: Agent): Tool[] {
+/** Builds the main coordinator's tools; `target` scopes prompt previews and, for DSH, receives assessment images. */
+export function mainTools(host: MainToolsHost, target: MainToolTarget): MainTool[] {
   const resources: MainResourceHost = { ...host.resources, sessions: host.sessions, settings: host.settings }
   return [
-    readTool('Read one page of a resource the resource parameter lists, such as the ticket list or a ticket. Follow next_offset, and next_resource where a page names one.',
-      false, (resource, offset, limit, signal) => readResource(resources, resource, offset, limit, undefined, signal)),
+    readOnly(readTool('Read one page of a resource the resource parameter lists, such as the ticket list or a ticket. Follow next_offset, and next_resource where a page names one.',
+      false, (resource, offset, limit, signal) => readResource(resources, resource, offset, limit, undefined, signal))),
     routeTool(host),
     tool({
       name: 'orchestrator_ticket_retry',
@@ -199,18 +204,23 @@ export function mainTools(host: MainToolsHost, agent: Agent): Tool[] {
         return { queued }
       },
     }),
-    tool({
+    readOnly(tool({
       name: 'orchestrator_eval',
       description: 'Load a proactive candidate\'s window and its thread\'s tickets; repeated calls reuse them.',
       schema: z.object({ trigger_id: z.string() }).strict(),
       execute: async (args, signal) => host.assessor.context(args.trigger_id, signal),
-    }),
-    tool({
+    })),
+    readOnly(tool({
       name: 'orchestrator_eval_read',
-      description: 'Read more of a candidate\'s context, always with its trigger_id: a message or stub whole by message_id, an image by image_id, the root, the parent, a thread page by cursor, or a file or directory by path.',
+      description: target.imageAgent
+        ? 'Read more of a candidate\'s context, always with its trigger_id: a message or stub whole by message_id, an image by image_id, the root, the parent, a thread page by cursor, or a file or directory by path.'
+        : 'Read more text from a candidate\'s context, always with its trigger_id: a message or stub whole by message_id, the root, the parent, a thread page by cursor, or a file or directory by path. Image attachments are unavailable through an external coordinator.',
       schema: EvalReadSchema,
-      execute: async (read, signal) => host.assessor.read(agent, read, signal),
-    }),
+      execute: async (read, signal) => {
+        if (read.resource === 'image' && !target.imageAgent) throw new Error('Assessment image reads are unavailable with an external coordinator')
+        return host.assessor.read(target.imageAgent, read, signal)
+      },
+    })),
     tool({
       name: 'orchestrator_eval_decide',
       description: 'Record the decision of an assessment, as admission describes it, after orchestrator_eval with the same trigger_id.',
@@ -287,8 +297,8 @@ export function mainTools(host: MainToolsHost, agent: Agent): Tool[] {
         if (args.preview) {
           const preview = host.prompts.preview(args.config)
           return { scope: preview.scope, previews: (['orchestrator', 'worker'] as const).map(role => {
-            const resource = `prompt-preview/${key(agent.id, role, preview[role])}`
-            host.resources.pages.set(`${agent.id}:${resource}`, preview[role])
+            const resource = `prompt-preview/${key(target.id, role, preview[role])}`
+            host.resources.pages.set(`${target.id}:${resource}`, preview[role])
             return { role, chars: preview[role].length, read: resource }
           }) }
         }

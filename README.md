@@ -29,6 +29,7 @@ Read the numbered documents in order; each builds only on the ones before it.
 - [006 Deployment](docs/006-deployment.md): manual setup, configuration, upgrades and troubleshooting
 - [007 Architecture](docs/007-architecture.md)
 - [008 Cookbook](docs/008-cookbook.md): adding a Source
+- [009 Codex adapter](docs/009-codex-adapter.md): this fork's optional Codex coordinator and workers
 
 ## Development
 
@@ -37,3 +38,7 @@ Read the numbered documents in order; each builds only on the ones before it.
 ## License
 
 [MIT](LICENSE)
+
+The independent [Codex adapter](adapters/codex-executor-bridge) has its own
+[Apache-2.0 license](adapters/codex-executor-bridge/LICENSE). It does not change
+the license or notices of the host code.

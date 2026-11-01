@@ -1,7 +1,6 @@
 /** Ticket list, ticket detail, mandate basis formatting, and executor load views. */
 import { liveTicket, threadKey, ticketStage, type AcceptMode, type AdmissionCell, type MandateBasis, type Ticket,
   type TicketStage } from '../../core/index.ts'
-import { workerSessionId } from '../../executor/dsh.ts'
 import type { Store } from '../store.ts'
 import { channelLink, decisionView, newestFirst, page, snapshot, threadSummary, ticketLine, type Snapshot,
   type ViewHost } from './records.ts'
@@ -71,12 +70,13 @@ export function ticketDetail(host: ViewHost, id: string) {
   }
   // Pass `human = false` for bot-originated mandates so the Source kind still labels the actor as a bot if removed from the policy list.
   const human = ticket.mandate.basis.via !== 'bot'
+  const sessionId = view.workerSessionId(ticket.id)
   return { ...ticketLine(view, ticket), mandate: { ...ticket.mandate, actor: view.actor(ticket.mandate.actor, human) },
     basis: basisFacts(ticket.mandate.basis, view.rule), paused: store.settings().paused,
     channels: ticket.channels.map(channel => channelLink(view, channel)),
     decision: decision ? decisionView(view, decision) : undefined,
     // Every started Assignment ran in the ticket's one worker Session. A running assignment whose worker reported a non-progress state has finished its turn unless a human response resumed the ticket.
-    assignments: ticket.assignments.map(assignment => ({ ...assignment, ...assignment.startedAt ? { ref: workerSessionId(ticket.id) } : {},
+    assignments: ticket.assignments.map(assignment => ({ ...assignment, ...assignment.startedAt && sessionId ? { ref: sessionId } : {},
       ...assignment.state === 'running' && assignment.report && assignment.report.state !== 'progress' && stage !== 'working'
         ? { turnEndedAt: assignment.report.at } : {} })),
     inputs: ticket.inputs.slice().reverse().map(input),

@@ -7,6 +7,8 @@
 - id: dsh-superagent
   config:
     stateDir: <absolute path, for example /home/me/.dsh/state/superagent>
+    # executorModule: <optional absolute path to an external Executor API v1 ESM module>
+    # coordinatorModule: <optional absolute path to an external Coordinator API v1 ESM module>
 # Feishu is optional: uncomment to enable its Source, then set the bot's lark-cli on the Feishu Source.
 # - id: dsh-superagent-feishu
 #   disabled: false

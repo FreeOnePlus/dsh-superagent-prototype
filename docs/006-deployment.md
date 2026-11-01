@@ -93,9 +93,15 @@ Copy [examples/profile.cordis.patch.yml](../examples/profile.cordis.patch.yml) t
 | Key | Required | Meaning |
 | --- | --- | --- |
 | `stateDir` | yes | Absolute path: the database, the lock, the command shims in `worker-bin`, the agent's git configuration and, by default, the Ticket directories in `work`. Back it up before upgrades |
+| `executorModule` | no | Absolute path to an ESM module that replaces only worker execution through external Executor API version 1; a load, version or shape error prevents startup |
+| `coordinatorModule` | no | Absolute path to an ESM module that replaces only the main coordinator through external Coordinator API version 1; a load, version or shape error prevents startup |
 | `promptMaxChars`, `admissionContextMaxPages`, `admissionContextTimeoutMs` | no | The largest saved prompt configuration, and how many Thread pages one assessment reads within what time |
 
-After the first start, edit machine limits in **Settings → Deployment** or the DeepSeek Harness Plugin Manager. Changes apply without restart. `stateDir` cannot be changed there. Invalid values or unknown configuration keys prevent startup; the log identifies the key.
+An external module exports `apiVersion = 1` and a synchronous `createExecutor(host, helpers)` function. It receives the current-version `ExecutorHost` connector and helpers for preparing Ticket metadata and missing workspaces, deferring busy effects, relaying recorded reports and checking whether a Ticket waits for a person, then returns the complete managed Executor lifecycle. The main Session remains a DSH Session. External workers do not have DSH worker Session links in the panel. There is no fallback to the built-in Executor when a configured module fails.
+
+An external coordinator module exports `apiVersion = 1` and a synchronous `createCoordinator(host)` function. Its host supplies the stable coordinator id and state directory, the abort lifetime, the current upstream-owned prompt and revision, the main tool descriptors, separate schema-only tool validation and validated tool execution, and local health reporting. The returned coordinator implements `start`, idempotent `deliver({ id, text, wake })`, `holds(id)`, `status`, and `shutdown`. Relays and assessments wake it; settings and prompt notices are delivered with `wake: false`. The built-in Engine, Store, effects, Sources, settings, worker Executor and prompts remain authoritative. A configured coordinator does not create or select a model for a DSH main Session, and assessment image reads explicitly remain unavailable because the external coordinator has no DSH attachment target. There is no fallback to the built-in main Session when the configured module fails.
+
+After the first start, edit machine limits in **Settings → Deployment** or the DeepSeek Harness Plugin Manager. Changes apply without restart. `stateDir`, `executorModule` and `coordinatorModule` cannot be changed there. Invalid values or unknown configuration keys prevent startup; the log identifies the key.
 
 ## Start and stop
 

@@ -222,13 +222,14 @@ export class MasterAssessor implements Assessor {
    * Serves bounded paginated text or image attachments from the evaluation's thread context or repository for
    * `orchestrator_eval_read`; `agent` is the main Session, which receives images as attachments.
    */
-  async read(agent: Agent, read: EvalRead, signal: AbortSignal) {
+  async read(agent: Agent | undefined, read: EvalRead, signal: AbortSignal) {
       const { candidate, trigger } = this.evalFor(read.trigger_id)
       await this.seed(candidate.evalId, trigger, signal)
       const { cache } = this.reads(candidate.evalId, trigger)
       const { snapshots, images, messages, cursors } = cache
       const commands = this.host.commands.withSignal(AbortSignal.any([this.controller.signal, signal]))
       if (read.resource === 'image') {
+        if (!agent) throw new Error('Assessment image reads are unavailable with an external coordinator')
         if (read.offset !== 0) throw new Error('Images are not paginated; use offset 0')
         const image = images.get(read.image_id!)
         if (!image) throw new Error('Unknown image reference. Read the source/root/thread for this trigger first and copy its image read arguments.')

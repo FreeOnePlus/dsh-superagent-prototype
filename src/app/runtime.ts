@@ -13,28 +13,31 @@ import type {} from '@deepseek-ai/dsh-subprocess'
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { lockSync } from 'proper-lockfile'
-import { Engine, key, reasonText, type EngineForSettings, type ReceiveResult, type Ticket, type Trigger } from '../core/index.ts'
+import { z } from 'zod'
+import { Engine, key, reasonText, waitsForPerson, type EngineForSettings, type ReceiveResult, type Ticket, type Trigger } from '../core/index.ts'
 import { allowedSender, settingsPolicy } from '../policy.ts'
 import { SourceRegistry } from '../sources/registry.ts'
 import { Commands } from '../infra/commands.ts'
 import type { Deployment, Machine } from '../deployment.ts'
 import { environmentOf, ticketEnvironment, type Variable } from './execution-environment.ts'
 import type { SetupProblem } from '../setup.ts'
-import { DshExecutor, sourceTrigger, triggerMessage, workerSessionId } from '../executor/dsh.ts'
+import { DshExecutor, prepareWorkspace, sourceTrigger, ticketExecution, triggerMessage, workerSessionId, type ExecutorHost } from '../executor/dsh.ts'
+import { createManagedExecutor, type ExecutorFactory, type ExecutorHelpers, type ManagedExecutor } from '../executor/extension.ts'
+import { createManagedCoordinator, type CoordinatorFactory, type CoordinatorHost, type ManagedCoordinator } from '../coordinator/extension.ts'
 import { ticketCard } from './cards.ts'
 import { MasterAssessor } from './assessment.ts'
 import { KV } from '../kv.ts'
 import { Store } from './store.ts'
 import { evalsHealth } from './views/overview.ts'
 import { TextCache } from './cache.ts'
-import { Effects } from './effects.ts'
+import { Effects, Later } from './effects.ts'
 import { Prompts } from './prompts.ts'
 import { registerHttp, type HttpHost } from './http.ts'
 import type { LinkTarget } from './views/records.ts'
 import { candidateCard, repliedTo, sourceLink, type LinkHost } from './links.ts'
-import { eventNotice, followupNotice } from './notices.ts'
+import { eventNotice, followupNotice, resultRelay } from './notices.ts'
 import { pullEndNotices } from '../sources/github-pull.ts'
-import { HealthBoard } from '../infra/health.ts'
+import { HealthBoard, type HealthEntry } from '../infra/health.ts'
 import { Outbox } from './outbox.ts'
 import { Passes } from './passes.ts'
 import { Setup } from './setup.ts'
@@ -64,8 +67,9 @@ export class Runtime extends Service implements SourceHost {
   readonly sources: SourceRegistry
   readonly commands: Commands
   readonly sessions: Sessions
+  readonly coordinator?: ManagedCoordinator
   readonly settings: Settings
-  readonly executor: DshExecutor
+  readonly executor: ManagedExecutor
   readonly assessor: MasterAssessor
   readonly outbox: Outbox
   readonly engine: Engine
@@ -73,10 +77,12 @@ export class Runtime extends Service implements SourceHost {
   readonly ready: Promise<void>
   private readonly board = new HealthBoard()
   private readonly runtimeHealth = this.board.claim('runtime', { state: 'starting', detail: '' })
+  private coordinatorHealth?: HealthEntry
   readonly masterId: string
   private readonly sourceLinks = new TextCache(200_000)
   private readonly stopped = new AbortController()
   private readonly disposers: (() => void)[] = []
+  private readonly nativeExecutor: boolean
   private releaseLock?: () => Promise<void>
   private closingFlag = false
   private stopping?: Promise<void>
@@ -84,8 +90,10 @@ export class Runtime extends Service implements SourceHost {
   private readonly toolHost: MainToolsHost & ExecutorToolsHost
   /** Non-zero while a main-Session tool is executing an Engine command, suppressing self-triggered domain event notices. */
   private quiet = 0
-  constructor(ctx: Context, readonly machine: Machine, restart: () => void) {
+  constructor(ctx: Context, readonly machine: Machine, restart: () => void, executorFactory?: ExecutorFactory,
+    coordinatorFactory?: CoordinatorFactory) {
     super(ctx, 'orchestrator')
+    this.nativeExecutor = executorFactory === undefined
     const runtime = this
     // Lock the state directory before opening the database so another process cannot migrate or write concurrently.
     mkdirSync(machine.stateDir, { recursive: true, mode: 0o700 })
@@ -120,14 +128,23 @@ export class Runtime extends Service implements SourceHost {
         feishuPageSize: () => feishuSettings(sources).readPageSize, sourceLink: link }
       const sessions = this.sessions = new Sessions({ context: ctx, store, prompts, effects, health: board.claim('models'), masterId,
         lifetime: this.lifetime,
+        coordinator: () => runtime.coordinator,
         closing: () => this.closing(), environment,
-        tools: (agent, ticket) => ticket ? executorTools(this.toolHost, ticket) : mainTools(this.toolHost, agent) })
+        tools: (agent, ticket) => ticket ? executorTools(this.toolHost, ticket) : mainTools(this.toolHost, { id: agent.id, imageAgent: agent }) })
       const policyChanged: EngineForSettings['policyChanged'] = (from, to, effects) => { this.engine.policyChanged(from, to, effects) }
       this.settings = new Settings({ store, sources, engine: { policyChanged }, health: board, context: ctx, lifetime: this.lifetime, sessions,
         sourceHost: this, setup, requestPass: () => { this.passes.request() } })
-      this.executor = new DshExecutor({ context: ctx, get engine() { return runtime.engine }, store, effects, health: board.claim('worker'), machine,
+      const executorHost: ExecutorHost = { context: ctx, get engine() { return runtime.engine }, store, effects, health: board.claim('worker'), machine,
         lifetime: this.lifetime, sessions, closing: () => this.closing(), paused: () => this.paused(), environment, sourceLink: link,
-        repliedTo: trigger => repliedTo({ store, sources }, trigger) })
+        repliedTo: trigger => repliedTo({ store, sources }, trigger) }
+      const executorHelpers: ExecutorHelpers = {
+        prepareTicket: (ticket, outcome) => ({ ...ticket, execution: ticketExecution(ticket, outcome, store.settings(), machine.stateDir) }),
+        prepareWorkspace: ticket => prepareWorkspace(executorHost, ticket),
+        defer: message => { throw new Later(message) },
+        relayReport: (ticket, state, summary) => { const relay = resultRelay(ticket, state, summary); executorHost.sessions.relay(relay.id, relay.text) },
+        waitsForPerson,
+      }
+      this.executor = executorFactory ? createManagedExecutor(executorFactory, executorHost, executorHelpers) : new DshExecutor(executorHost)
       this.assessor = new MasterAssessor({ get engine() { return runtime.engine }, commands, get deployment() { return setup.deployment }, effects,
         settings: () => store.settings(), paused: () => this.paused(), threadContext: trigger => sources.threadContext(trigger),
         deliver: (id, text) => sessions.prompt(masterId, id, text, 'steer'), candidateCard: candidate => candidateCard(links, candidate) })
@@ -163,6 +180,37 @@ export class Runtime extends Service implements SourceHost {
         get github() { return runtime.context({ kind: 'github', health: ['github'] }) },
         requestPass: () => { passes.request() }, sendReplies: () => outbox.sent(),
         quietly: run => { this.quiet++; try { return run() } finally { this.quiet-- } } }
+      if (coordinatorFactory) {
+        const tools = mainTools(this.toolHost, { id: masterId })
+        const byName = new Map(tools.map(definition => [definition.name, definition]))
+        const descriptors = Object.freeze(tools.map(definition => Object.freeze({ name: definition.name,
+          description: definition.description, inputSchema: z.toJSONSchema(definition.schema) as Readonly<Record<string, unknown>>,
+          ...(definition.readOnly ? { readOnly: true } : {}) })))
+        const definition = (name: string) => {
+          const found = byName.get(name)
+          if (!found) throw new Error(`Unknown coordinator tool: ${name}`)
+          return found
+        }
+        const validated = (name: string, args: unknown) => {
+          const tool = definition(name), parsed = tool.schema.parse(args)
+          if (name === 'orchestrator_eval_read' && (parsed as { resource?: unknown }).resource === 'image') {
+            throw new Error('Assessment image reads are unavailable with an external coordinator')
+          }
+          return { tool, parsed }
+        }
+        const health = this.coordinatorHealth = board.claim('coordinator', { state: 'starting', detail: 'External coordinator is starting' })
+        const coordinatorHost: CoordinatorHost = {
+          id: masterId, stateDir: machine.stateDir, lifetime: this.lifetime,
+          prompt: () => sessions.coordinatorPrompt(), tools: () => descriptors,
+          validateTool: (name, args) => validated(name, args).parsed,
+          executeTool: async (name, args, signal) => {
+            const { tool, parsed } = validated(name, args)
+            return tool.execute(parsed, AbortSignal.any([this.lifetime, signal]))
+          },
+          health: status => { health.set(status) },
+        }
+        this.coordinator = createManagedCoordinator(coordinatorFactory, coordinatorHost)
+      }
       this.ready = this.initialize()
     } catch (error) {
       // Release the database and state lock if initialization fails so an in-process restart can reacquire them.
@@ -207,7 +255,17 @@ export class Runtime extends Service implements SourceHost {
     }
     this.sessions.install()
     this.executor.install()
-    await this.sessions.ensure(this.masterId, this.machine.stateDir, 'dsh-superagent orchestrator', 'orchestrator')
+    if (this.coordinator) {
+      try {
+        await this.coordinator.start()
+        if (this.coordinatorHealth?.get()?.state === 'starting') {
+          this.coordinatorHealth.set({ state: 'ready', detail: 'External coordinator is ready', at: now() })
+        }
+      } catch (error) {
+        this.coordinatorHealth?.set({ state: 'error', detail: String(error), at: now() })
+        throw error
+      }
+    } else await this.sessions.ensure(this.masterId, this.machine.stateDir, 'dsh-superagent orchestrator', 'orchestrator')
     for (const id of this.settings.syncable()) await this.settings.sync(id).catch(() => { /* sync() records its failure in health. */ })
     // If stop() was called while awaiting setup, session creation, or policy sync, do not start background loops.
     if (this.closing()) return
@@ -220,6 +278,8 @@ export class Runtime extends Service implements SourceHost {
     const runtime = this
     const { store, sources, prompts, sessions, settings, engine, executor, health, machine, masterId, ready, sourceLinks, setup, passes } = this
     return { store, sources, prompts, sessions, settings, engine, executor, health, machine, masterId, ready, sourceLinks,
+      get mainSessionId() { return runtime.coordinator ? null : masterId },
+      workerSessionId: ticketId => runtime.nativeExecutor ? workerSessionId(ticketId) : null,
       get deployment() { return setup.deployment },
       get setupProblem() { return setup.problem }, get feishuProblem() { return setup.feishuProblem },
       configured: () => setup.configured(), links: () => runtime.links(), ticketEnvironment: ticket => runtime.ticketEnvironment(ticket),
@@ -231,10 +291,11 @@ export class Runtime extends Service implements SourceHost {
     this.closingFlag = true; const passes = this.passes.stop(); this.stopped.abort()
     try {
       this.assessor.stop()
-      const ids = [this.masterId, ...this.store.tickets.list().map(ticket => workerSessionId(ticket.id))]
+      const ids = [...(this.coordinator ? [] : [this.masterId]), ...this.store.tickets.list().map(ticket => workerSessionId(ticket.id))]
       const agents = ids.map(id => this.ctx.agents.get(id as SessionId)).filter((agent): agent is Agent => agent !== undefined)
       for (const agent of agents) agent.cancel({ kind: 'user' }, { keepInbox: true })
-      await Promise.allSettled([passes, this.effects.drain(), ...agents.map(agent => agent.whenIdle())])
+      const coordinator = this.coordinator ? Promise.resolve().then(() => this.coordinator!.shutdown()) : Promise.resolve()
+      await Promise.allSettled([passes, this.effects.drain(), coordinator, ...agents.map(agent => agent.whenIdle())])
       // The workers' jobs and subagents stop too: their ends would start worker turns without the tool limits released below.
       await this.executor.shutdown()
       this.executor.dispose()
